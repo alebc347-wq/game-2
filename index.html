@@ -1,0 +1,1198 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"> 
+<title>真實物理沙盒 - 底部空間優化版</title>
+<style>
+/* 確保 body 填滿視口並禁止滾動 */
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0b0b0b;
+}
+
+body{
+  color:#ccc;
+  font-family:Consolas;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+}
+
+/* 總控制區：限制最大寬度，並確保其寬度與畫布同步 */
+#controls {
+    width: 95%; 
+    max-width: 900px;
+}
+/* 筆刷與模式控制：頂部 flex 佈局 */
+#top-controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 5px; 
+}
+#brush-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px; 
+}
+
+/* 模式按鈕樣式 */
+#crazy-mode-button {
+    background-color: #ff4500;
+    color: white;
+    font-weight: bold;
+    padding: 6px 10px; 
+}
+#crazy-mode-button.active {
+    background-color: #4CAF50;
+    animation: flash 0.5s infinite alternate; 
+}
+@keyframes flash {
+    from {box-shadow: 0 0 10px #ff4500;}
+    to {box-shadow: 0 0 20px #ff4500;}
+}
+
+/* 滑動容器樣式：用於元素按鈕 */
+#ui-container {
+  overflow-x: auto; 
+  margin: 4px 0 8px 0; 
+  white-space: nowrap; 
+  padding-bottom: 5px; 
+}
+
+/* 按鈕容器 */
+#ui-scroll{
+  display: flex; 
+  gap: 5px; 
+  padding: 0 5px; 
+}
+
+/* 調整按鈕大小 */
+button{
+  padding: 6px 10px; 
+  border: none;
+  cursor: pointer;
+  color: #fff;
+  font-size: 13px; 
+  min-width: 80px; 
+  max-width: 120px; 
+  white-space: normal; 
+  height: auto; 
+  line-height: 1.1;
+  box-sizing: border-box;
+  display: inline-block; 
+}
+
+button.active{outline:2px solid #00e0ff}
+
+/* 對話/訊息日誌區域 */
+#game-log {
+    position: fixed;
+    bottom: 30px;
+    right: 20px;
+    width: 300px;
+    max-height: 150px;
+    overflow-y: auto;
+    background: rgba(0, 0, 0, 0.8);
+    border: 1px solid #444;
+    padding: 10px;
+    font-size: 12px;
+    pointer-events: none;
+    display: flex;
+    flex-direction: column-reverse;
+    border-radius: 8px;
+    z-index: 100;
+}
+.log-msg {
+    margin-bottom: 4px;
+    border-bottom: 1px solid #222;
+    padding-bottom: 2px;
+    animation: fadeIn 0.2s;
+}
+.log-name { font-weight: bold; color: #4db8ff; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
+/* FPS 計數器 */
+#fps-counter {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    color: #00ff00;
+    font-family: monospace;
+    font-size: 14px;
+    z-index: 1000;
+    pointer-events: none;
+}
+
+/* 畫布樣式：佔據所有剩餘空間 */
+canvas{
+  border:3px solid #444;
+  image-rendering:pixelated;
+  touch-action:none; 
+  /* 確保底部有足夠的邊距，防止被平板系統UI遮擋 */
+  margin-bottom: 10px; 
+  /* 禁止 Flex 自動拉伸導致座標偏移 */
+  flex-grow: 0;
+  flex-shrink: 0;
+}
+</style>
+</head>
+<body>
+
+<div id="controls">
+    <div id="top-controls">
+        <div id="brush-controls">
+            <span>筆刷大小:</span>
+            <input id="brush" type="range" min="1" max="5" value="1">
+            <span id="bval">1</span>
+        </div>
+        <div style="display:flex; gap:10px;">
+            <button id="clear-btn" style="background:#cc3333;">全部清除</button>
+            <button id="fullscreen-btn" style="background:#3366cc;">全螢幕</button>
+            <button id="crazy-mode-button">瘋狂模式</button>
+        </div>
+    </div>
+    
+    <div id="ui-container">
+        <div id="ui-scroll">
+            </div>
+    </div>
+</div>
+
+<canvas id="c"></canvas>
+<div id="game-log"></div>
+<div id="fps-counter">FPS: 0</div>
+
+<script>
+/* ===== 基本設定與動態尺寸計算 (底部空間優化) ===== */
+const SIZE = 4;
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+let COLS, ROWS;
+let imgData, data; // 全局變量，避免每幀創建
+
+const controls = document.getElementById('controls');
+
+function resizeCanvas() {
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    
+    // 1. 先計算並設置寬度，這樣 controls 的高度才會準確（因為內容可能換行）
+    const availableWidth = viewportWidth * 0.95; 
+    let newWidth = Math.floor(availableWidth / SIZE) * SIZE;
+    if (newWidth > 900) newWidth = 900;
+    
+    // 應用寬度到控制列
+    controls.style.width = newWidth + 'px';
+    
+    // 2. 獲取調整寬度後的 controls 高度
+    const controlsHeight = controls.offsetHeight;
+    
+    // 3. 計算可用高度
+    // 減去 controlsHeight
+    // 減去 margin-bottom (10px)
+    // 減去 border (3px top + 3px bottom = 6px)
+    // 減去 額外緩衝 (buffer = 20px)
+    const marginBottom = 10;
+    const border = 6;
+    const buffer = 20;
+    
+    const availableHeight = viewportHeight - controlsHeight - marginBottom - border - buffer; 
+
+    // 確定畫布高度
+    let newHeight = Math.floor(availableHeight / SIZE) * SIZE;
+
+    // 限制最小高度
+    if (newHeight < 100) newHeight = 100;
+
+    canvas.width = newWidth;
+    canvas.height = newHeight;
+    
+    // 強制設定 CSS 尺寸與屬性尺寸一致，防止瀏覽器縮放導致座標偏移
+    canvas.style.width = newWidth + 'px';
+    canvas.style.height = newHeight + 'px';
+    
+    // 創建並緩存 ImageData 對象
+    imgData = ctx.createImageData(newWidth, newHeight);
+    data = new Uint32Array(imgData.data.buffer);
+    
+    COLS = (canvas.width / SIZE) | 0;
+    ROWS = (canvas.height / SIZE) | 0;
+    
+    if (world.length !== ROWS || (world.length > 0 && world[0].length !== COLS)) {
+        initializeWorld();
+    }
+}
+
+window.addEventListener('resize', resizeCanvas);
+
+
+/* ===== 瘋狂模式變數 (不變) ===== */
+let gDir = { x: 0, y: 1 }; 
+let crazyModeActive = false;
+
+/* ===== 類型定義 (T) (不變) ===== */
+const T = {
+  EMPTY:0, SAND:1, WATER:2, OIL:3,
+  WOOD:4, FIRE:5, TNT:6, STONE:7, ACID:8,
+  BANANA_BOMB:9, POOP:10, 
+  BUTTERFLY:11,
+  BENZAMIDE_DERIVATIVE:12, 
+  DIRT:13, 
+  SEED:14,
+  VOID:15,
+  TESLA:20, NEWTON:21, CURIE:22, ELON:23,
+  EINSTEIN:26, DARWIN:27, EDISON:28, OPPENHEIMER:29,
+  LIGHTNING:24, ROCKET:25,
+  PRANK_TICKLE: 100, PRANK_SHOCK: 101, PRANK_BLACKHOLE: 102,
+  ICE:30, STEAM:31, LAVA:32, MERCURY:33, METHANE:34,
+  CEMENT:35, VIRUS:36, ANTIMATTER:37, SPONGE:38, SNOW:39,
+  ASH:40, SALT:41, SOAP:42, SLIME:43, GLASS:44,
+  BRICK:45, STEEL:46, COAL:47, FUSE:48, DRY_ICE:49,
+  PLANT:50, FLOWER:51, VINE:52, MOSS:53, FIREWORK:54,
+  CONFETTI:55, GLITTER:56, BONE:57, BLOOD:58, URANIUM:59
+};
+
+/* ===== 數據 (D) (不變) ===== */
+const D = {
+  0:{c:"#0b0b0b",d:0, name:"空"},
+  1:{c:"#c2b280",d:6,fall:true, name:"沙子"},
+  2:{c:"#3399ff",d:5,fluid:true, name:"水"},
+  3:{c:"#553311",d:4,fluid:true,flammable:true, name:"油"},
+  4:{c:()=>`#${(0x8B5A2B + Math.floor(Math.random()*10)).toString(16)}`,d:3, static:true, flammable:true, name:"木頭", slowBurn:true}, 
+  5:{c:"#ffcc33",d:1, name:"火"},
+  6:{c:"#ff3333",d:10,tnt:true, static:true, flammable:true, name:"TNT"}, 
+  7:{c:"#777777",d:7, static:true, name:"石頭"},
+  8:{c:"#66ff66",d:4,fluid:true,acid:true, name:"酸"},
+  9:{c:"#ffff66",d:6,banana:true, fall:true, float:true, flammable:true, name:"香蕉炸彈"}, 
+  10:{c:"#8B4513",d:5,fall:true, flammable:true, name:"大便"},
+  11:{c:"#800080",d:0.1, fly:true, name:"寬尾鳳蝶亞種褐斑寬尾鳳蝶"},
+  12:{c:"#cccccc",d:10, static:true, name:"(S)-N-[2-(N,N-二異丙基氨基)乙基]苯甲酰胺", immobile: true}, 
+  13:{c:"#5a3b2a",d:6, fall:true, name:"泥土"}, 
+  14:{c:"#00aa00",d:5, fall:true, name:"種子"},
+  15:{c:"#150030",d:100, static:true, name:"虛空", immobile: true}, 
+  20:{c:"#00e0ff",d:5, fall:true, name:"特斯拉", char:true},
+  21:{c:"#8eff24",d:5, fall:true, name:"牛頓", char:true},
+  22:{c:"#e6ff00",d:5, fall:true, name:"居禮夫人", char:true},
+  23:{c:"#ff4500",d:5, fall:true, name:"馬斯克", char:true},
+  26:{c:"#aaaaaa",d:5, fall:true, name:"愛因斯坦", char:true},
+  27:{c:"#4caf50",d:5, fall:true, name:"達爾文", char:true},
+  28:{c:"#ffcc00",d:5, fall:true, name:"愛迪生", char:true},
+  29:{c:"#333333",d:5, fall:true, name:"奧本海默", char:true},
+  24:{c:"#ffffff",d:0, name:"閃電", life:10},
+  25:{c:"#ff8800",d:1, name:"火箭火", life:20},
+  30:{c:"#aaddff",d:4,fall:true,name:"冰"},
+  31:{c:"#ddeeFF",d:0,fly:true,name:"水蒸氣"},
+  32:{c:"#ff4400",d:5,fluid:true,name:"岩漿"},
+  33:{c:"#b0b0b0",d:15,fluid:true,name:"水銀"},
+  34:{c:"#440044",d:0,fly:true,flammable:true,name:"甲烷"},
+  35:{c:"#999999",d:6,fluid:true,name:"水泥"},
+  36:{c:"#88ff88",d:5,fluid:true,name:"病毒"},
+  37:{c:"#330000",d:1,fall:true,name:"反物質"},
+  38:{c:"#ffff88",d:2,static:true,name:"海綿"},
+  39:{c:"#ffffff",d:2,fall:true,name:"雪"},
+  40:{c:"#555555",d:2,fall:true,name:"灰燼"},
+  41:{c:"#eeeeee",d:5,fall:true,name:"鹽"},
+  42:{c:"#ffcccc",d:4,fluid:true,name:"肥皂"},
+  43:{c:"#00ff00",d:4,fluid:true,name:"史萊姆"},
+  44:{c:"#88ccff",d:10,static:true,name:"玻璃"},
+  45:{c:"#aa4444",d:10,static:true,name:"磚塊"},
+  46:{c:"#555577",d:15,static:true,name:"鋼鐵"},
+  47:{c:"#222222",d:5,fall:true,flammable:true,name:"煤炭"},
+  48:{c:"#332211",d:4,static:true,flammable:true,name:"導火線"},
+  49:{c:"#eeeeff",d:3,fall:true,name:"乾冰"},
+  50:{c:"#00aa00",d:4,static:true,flammable:true,name:"植物"},
+  51:{c:"#ff66aa",d:4,static:true,name:"花"},
+  52:{c:"#008800",d:4,static:true,name:"藤蔓"},
+  53:{c:"#448844",d:4,static:true,name:"青苔"},
+  54:{c:"#ff00ff",d:5,fall:true,name:"煙火"},
+  55:{c:()=>`#${Math.floor(Math.random()*16777215).toString(16)}`,d:1,fall:true,name:"彩帶"},
+  56:{c:()=>`#${Math.floor(Math.random()*16777215).toString(16)}`,d:3,fall:true,name:"亮粉"},
+  57:{c:"#eeeecc",d:8,static:true,name:"骨頭"},
+  58:{c:"#aa0000",d:5,fluid:true,name:"血"},
+  59:{c:"#00ff00",d:10,fall:true,name:"鈾"},
+  100:{c:"#ff69b4",d:0, name:"惡搞:搔癢羽毛", tool:true},
+  101:{c:"#ffff00",d:0, name:"惡搞:電擊槍", tool:true},
+  102:{c:"#000000",d:0, name:"惡搞:黑洞", tool:true}
+};
+
+/* ===== 世界狀態 - 初始化 (不變) ===== */
+let world = [];
+let bombTimer = {};
+
+function initializeWorld() {
+    if (COLS && ROWS) {
+        const oldWorld = world;
+        const oldRows = oldWorld.length;
+        const oldCols = oldWorld.length > 0 ? oldWorld[0].length : 0;
+        
+        world = Array.from({length:ROWS},(_, y) => 
+            Array.from({length:COLS}, (_, x) => {
+                if (y < oldRows && x < oldCols) {
+                    return oldWorld[y][x]; 
+                }
+                return T.EMPTY; 
+            })
+        );
+    }
+}
+
+function clearWorld() {
+    world = Array.from({length:ROWS}, () => Array(COLS).fill(T.EMPTY));
+    bombTimer = {};
+}
+
+resizeCanvas(); 
+initializeWorld();
+
+
+/* ===== UI 創建與控制邏輯 (不變) ===== */
+let tool = T.SAND;
+const ui = document.getElementById("ui-scroll");
+const crazyModeButton = document.getElementById("crazy-mode-button");
+const clearBtn = document.getElementById("clear-btn");
+const fullscreenBtn = document.getElementById("fullscreen-btn");
+
+clearBtn.onclick = () => {
+    if(confirm("確定要清除所有內容嗎？")) {
+        clearWorld();
+    }
+};
+
+fullscreenBtn.onclick = () => {
+    if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(err => {
+            alert(`Error attempting to enable full-screen mode: ${err.message} (${err.name})`);
+        });
+        fullscreenBtn.textContent = "退出全螢幕";
+    } else {
+        if (document.exitFullscreen) {
+            document.exitFullscreen();
+            fullscreenBtn.textContent = "全螢幕";
+        }
+    }
+};
+
+document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement) {
+        fullscreenBtn.textContent = "全螢幕";
+        // 退出全螢幕時重新調整大小以確保正確
+        setTimeout(resizeCanvas, 100);
+    } else {
+        fullscreenBtn.textContent = "退出全螢幕";
+        setTimeout(resizeCanvas, 100);
+    }
+});
+
+Object.keys(T).forEach(k=>{
+  if(k==="EMPTY") return;
+  const id = T[k];
+  const b=document.createElement("button");
+  
+  b.textContent=D[id].name; 
+  b.style.background=typeof D[id].c === 'function' ? "#8b5a2b" : D[id].c; 
+
+  if (D[id].name.length > 20) {
+      b.style.fontSize = '10px';
+  } else if (D[id].name.length > 10) {
+       b.style.fontSize = '12px';
+  }
+
+  b.onclick=()=>{
+    tool=id;
+    document.querySelectorAll("#ui-scroll button").forEach(x=>x.classList.remove("active"));
+    b.classList.add("active");
+  };
+  ui.appendChild(b);
+});
+ui.children[0].classList.add("active");
+
+
+// 瘋狂模式按鈕邏輯 (純粹混亂模式)
+crazyModeButton.onclick = () => {
+    crazyModeActive = !crazyModeActive;
+    crazyModeButton.classList.toggle('active', crazyModeActive);
+    if (crazyModeActive) {
+        gDir = { x: 0, y: 0 }; 
+        crazyModeButton.textContent = "瘋狂模式 (混亂中...)";
+    } else {
+        gDir = { x: 0, y: 1 }; 
+        crazyModeButton.textContent = "瘋狂模式";
+    }
+};
+
+
+let brushSize=1;
+const brushInput = document.getElementById("brush");
+const bvalSpan = document.getElementById("bval");
+brushInput.oninput=e=>{
+  brushSize=+e.target.value;
+  bvalSpan.textContent=brushSize;
+};
+
+
+/* ===== 繪圖邏輯 (不變) ===== */
+function inB(x,y){return x>=0&&x<COLS&&y>=0&&y<ROWS}
+function paint(x,y){
+  if (tool >= 100) {
+      if (tool === T.PRANK_TICKLE) {
+          for(let dy=-brushSize*2;dy<=brushSize*2;dy++)
+            for(let dx=-brushSize*2;dx<=brushSize*2;dx++){
+               let tx=x+dx, ty=y+dy;
+               if(inB(tx,ty)) {
+                   let id = world[ty][tx];
+                   if(D[id] && D[id].char) {
+                       if(Math.random()<0.3) {
+                           const laughs = ["嘻嘻！", "好癢！", "別鬧！", "哈哈哈哈！"];
+                           logMsg(D[id].name, laughs[Math.floor(Math.random()*laughs.length)]);
+                           // 向上彈起
+                           let jumpH = Math.floor(Math.random()*5)+3;
+                           if(inB(tx, ty-jumpH) && world[ty-jumpH][tx] === T.EMPTY) {
+                               world[ty-jumpH][tx] = id;
+                               world[ty][tx] = T.EMPTY;
+                           }
+                       }
+                   }
+               }
+            }
+          return;
+      }
+      if (tool === T.PRANK_SHOCK) {
+          if(inB(x,y)) world[y][x] = T.LIGHTNING;
+          return;
+      }
+      if (tool === T.PRANK_BLACKHOLE) {
+           for(let dy=-brushSize*3;dy<=brushSize*3;dy++)
+            for(let dx=-brushSize*3;dx<=brushSize*3;dx++){
+               if(inB(x+dx,y+dy)) {
+                   if(world[y+dy][x+dx] !== T.VOID) world[y+dy][x+dx]=T.EMPTY;
+               }
+            }
+           return;
+      }
+  }
+
+  if (tool === T.SEED) {
+    for(let dy=0;dy<brushSize;dy++)
+      for(let dx=0;dx<brushSize;dx++){
+        let currentX = x + dx;
+        let currentY = y + dy;
+        if(inB(currentX, currentY)) {
+             world[currentY][currentX] = T.SEED;
+        }
+      }
+    return;
+  }
+  
+  for(let dy=0;dy<brushSize;dy++)
+    for(let dx=0;dx<brushSize;dx++)
+      if(inB(x+dx,y+dy)) world[y+dy][x+dx]=tool;
+}
+
+function line(x0,y0,x1,y1){
+  let dx=Math.abs(x1-x0),dy=Math.abs(y1-y0);
+  let sx=x0<x1?1:-1,sy=y0<y1?1:-1,err=dx-dy;
+  while(true){
+    paint(x0,y0);
+    if(x0==x1&&y0==y1)break;
+    let e2=2*err;
+    if(e2>-dy){err-=dy;x0+=sx}
+    if(e2<dx){err+=dx;y0+=sy}
+  }
+}
+
+let isDrawing=false,lx,ly;
+
+function getPos(e){
+  const r=canvas.getBoundingClientRect();
+  const p=e.touches?e.touches[0]:e;
+  return {x:((p.clientX-r.left)/SIZE)|0,y:((p.clientY-r.top)/SIZE)|0};
+}
+
+canvas.onmousedown=e=>{
+    isDrawing = true;
+    let p=getPos(e); 
+    lx=p.x;
+    ly=p.y;
+    paint(lx, ly); 
+}; 
+
+canvas.onmousemove=e=>{
+    if(!isDrawing) return;
+    if (tool !== T.BUTTERFLY) {
+        let p=getPos(e);
+        line(lx,ly,p.x,p.y);
+        lx=p.x;
+        ly=p.y;
+    }
+};
+
+canvas.onmouseup=canvas.onmouseleave=()=>isDrawing=false;
+
+canvas.ontouchstart=e=>{
+    e.preventDefault(); 
+    isDrawing = true;
+    let p=getPos(e);
+    lx=p.x;
+    ly=p.y;
+    paint(lx, ly); 
+}; 
+
+canvas.ontouchmove=e=>{
+    e.preventDefault(); 
+    if(!isDrawing) return;
+    if (tool !== T.BUTTERFLY) {
+        let p=getPos(e);
+        line(lx,ly,p.x,p.y);
+        lx=p.x;
+        ly=p.y;
+    }
+};
+
+canvas.ontouchend=()=>isDrawing=false;
+
+/* ===== 爆炸函數 (移至 step() 上方, 解決 ReferenceError) ===== */
+function explode(cx,cy, radius, type){
+  const radiusSq = radius * radius;
+  for(let y=cy-radius;y<=cy+radius;y++)for(let x=cx-radius;x<=cx+radius;x++){
+    if(!inB(x,y))continue;
+    
+    if((x-cx)**2+(y-cy)**2 < radiusSq){
+      let targetID = world[y][x];
+      
+      if((targetID === T.TNT || targetID === T.BANANA_BOMB) && !bombTimer[x+","+y]) {
+        bombTimer[x+","+y]=30; 
+      }
+
+      if(targetID === T.BENZAMIDE_DERIVATIVE) {
+         world[y][x] = T.EMPTY;
+         continue; 
+      }
+
+      if(targetID === T.VOID) {
+         continue;
+      }
+
+      if(targetID !== T.EMPTY){
+        world[y][x]=Math.random()<0.4?T.FIRE:T.EMPTY;
+      }
+    }
+  }
+  world[cy][cx] = T.EMPTY;
+}
+
+/* ===== 模擬步驟 (核心邏輯不變) ===== */
+function step(){
+  
+  for(let y=ROWS-1;y>=0;y--)for(let x=0;x<COLS;x++){
+    let id=world[y][x],d=D[id];
+    if(id===0)continue;
+
+    let isStatic = d.static;
+    
+    // 靜態元素互動檢查 (VOID)
+    if(isStatic) {
+        if (id === T.VOID) {
+             for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+                if(dx===0&&dy===0)continue;
+                let xx=x+dx,yy=y+dy;
+                if(inB(xx,yy) && world[yy][xx] !== T.EMPTY && world[yy][xx] !== T.VOID) {
+                    world[yy][xx] = T.EMPTY;
+                }
+            }
+        }
+        
+        if (d.immobile) {
+            continue;
+        }
+
+        if (!crazyModeActive) {
+            continue;
+        }
+    }
+    
+    /* 瘋狂模式：純粹隨機移動 */
+    if (crazyModeActive && !d.immobile) {
+        if(Math.random() < 0.5) continue; 
+
+        let dx = Math.floor(Math.random() * 3) - 1; 
+        let dy = Math.floor(Math.random() * 3) - 1; 
+
+        if (dx === 0 && dy === 0) continue; 
+        
+        let nx=x+dx,ny=y+dy; 
+        
+        if(inB(nx,ny)){
+            let targetID = world[ny][nx];
+            if(targetID === T.EMPTY || (D[targetID] && D[targetID].d < d.d && !D[targetID].immobile)) {
+                 [world[y][x],world[ny][nx]]=[world[ny][nx],id];
+            }
+        }
+        continue;
+    }
+    
+    // --- 正常模式 (重力、流體、火、酸、爆炸) 從此處繼續 ---
+
+    /* === 新增物品行為邏輯 === */
+    // 岩漿 (LAVA)
+    if (id === T.LAVA) {
+        if (Math.random() < 0.05) {
+            const rx = x + Math.floor(Math.random()*3)-1;
+            const ry = y + Math.floor(Math.random()*3)-1;
+            if (inB(rx, ry)) {
+                const tid = world[ry][rx];
+                if (tid === T.WATER) {
+                    world[y][x] = T.STONE; // 冷卻
+                    world[ry][rx] = T.STEAM; // 蒸發
+                } else if (tid === T.ICE || tid === T.SNOW) {
+                    world[ry][rx] = T.WATER;
+                } else if (D[tid] && D[tid].flammable) {
+                    world[ry][rx] = T.FIRE;
+                }
+            }
+        }
+    }
+    
+    // 冰 (ICE) / 雪 (SNOW) / 乾冰 (DRY_ICE)
+    if (id === T.ICE || id === T.SNOW || id === T.DRY_ICE) {
+        if (Math.random() < 0.005) {
+            if (id === T.DRY_ICE) world[y][x] = T.METHANE; // 昇華
+            else if (inB(x, y+1) && world[y+1][x] === T.FIRE) world[y][x] = T.WATER; // 受熱融化
+            else if (Math.random() < 0.0001) world[y][x] = T.WATER; // 自然融化
+        }
+    }
+
+    // 水蒸氣 (STEAM)
+    if (id === T.STEAM) {
+        if (Math.random() < 0.01) {
+            world[y][x] = T.WATER; // 凝結
+        }
+    }
+    
+    // 水泥 (CEMENT)
+    if (id === T.CEMENT) {
+        if (Math.random() < 0.005) {
+            world[y][x] = T.STONE; // 硬化
+        }
+    }
+    
+    // 病毒 (VIRUS)
+    if (id === T.VIRUS) {
+        if (Math.random() < 0.1) {
+            const rx = x + Math.floor(Math.random()*3)-1;
+            const ry = y + Math.floor(Math.random()*3)-1;
+            if (inB(rx, ry)) {
+                const tid = world[ry][rx];
+                if (tid === T.PLANT || tid === T.FLOWER || tid === T.VINE || tid === T.WOOD || (D[tid] && D[tid].char)) {
+                    world[ry][rx] = T.SLIME;
+                }
+            }
+        }
+    }
+    
+    // 反物質 (ANTIMATTER)
+    if (id === T.ANTIMATTER) {
+         for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+            if (dx===0 && dy===0) continue;
+            let nx=x+dx, ny=y+dy;
+            if (inB(nx, ny) && world[ny][nx] !== T.EMPTY && world[ny][nx] !== T.ANTIMATTER) {
+                world[ny][nx] = T.EMPTY;
+                world[y][x] = T.EMPTY; // 湮滅
+                if(Math.random()<0.5) explode(x,y, 3, T.TNT);
+                break; 
+            }
+         }
+    }
+
+    // 海綿 (SPONGE)
+    if (id === T.SPONGE) {
+         for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+            let nx=x+dx, ny=y+dy;
+            if (inB(nx, ny) && world[ny][nx] === T.WATER) {
+                world[ny][nx] = T.EMPTY; // 吸水
+            }
+         }
+    }
+    
+    // 植物生長 (PLANT, VINE)
+    if ((id === T.PLANT || id === T.VINE) && Math.random() < 0.02) {
+        let waterNearby = false;
+        for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){
+            if(inB(x+dx, y+dy) && world[y+dy][x+dx] === T.WATER) {
+                waterNearby = true;
+                if(Math.random()<0.1) world[y+dy][x+dx] = T.EMPTY; 
+            }
+        }
+        
+        if (waterNearby) {
+            let gx = x + Math.floor(Math.random()*3)-1;
+            let gy = y - 1; 
+            if (id === T.VINE) gy = y + Math.floor(Math.random()*3)-1; 
+            
+            if (inB(gx, gy) && world[gy][gx] === T.EMPTY) {
+                world[gy][gx] = id === T.PLANT && Math.random()<0.2 ? T.FLOWER : id;
+            }
+        }
+    }
+    
+    // 煙火 (FIREWORK)
+    if (id === T.FIREWORK) {
+        if (Math.random() < 0.2 && inB(x, y-1) && world[y-1][x] === T.EMPTY) {
+             world[y-1][x] = T.FIREWORK; 
+             world[y][x] = T.EMPTY; 
+             continue;
+        }
+        if (Math.random() < 0.05) {
+             explode(x, y, 5, T.TNT); 
+             for(let dy=-3;dy<=3;dy++)for(let dx=-3;dx<=3;dx++){
+                 if(inB(x+dx, y+dy) && world[y+dy][x+dx] === T.EMPTY && Math.random()<0.3) {
+                     world[y+dy][x+dx] = Math.random()<0.5 ? T.CONFETTI : T.GLITTER;
+                 }
+             }
+             world[y][x] = T.EMPTY;
+        }
+    }
+
+    // 鈾 (URANIUM)
+    if (id === T.URANIUM) {
+        if (Math.random() < 0.02) {
+             const rx = x + Math.floor(Math.random()*3)-1;
+             const ry = y + Math.floor(Math.random()*3)-1;
+             if (inB(rx, ry) && world[ry][rx] === T.EMPTY) {
+                 world[ry][rx] = T.FIRE; 
+             }
+        }
+    }
+
+    /* === 知名人物行為 === */
+    if (d.char) {
+        // 隨機說話
+        if (Math.random() < 0.005) {
+             const msgs = {
+                 [T.TESLA]: ["交流電才是未來！", "無限能量！", "小心高壓電！", "愛迪生是大笨蛋！"],
+                 [T.NEWTON]: ["蘋果在哪？", "萬有引力...", "微積分是我發明的！", "站在巨人的肩膀上。"],
+                 [T.CURIE]: ["這光芒真美...", "科學需要犧牲。", "鐳的力量。", "有點暈..."],
+                 [T.ELON]: ["火星我來了！", "股價又漲了。", "Doge to the moon!", "全自動駕駛明年就出！"],
+                 [T.EINSTEIN]: ["E=mc²", "時間是相對的。", "上帝不擲骰子。", "想像力比知識重要。"],
+                 [T.DARWIN]: ["物競天擇。", "適者生存。", "演化...", "這隻鳥的喙很有趣。"],
+                 [T.EDISON]: ["天才是一分靈感...", "我沒有失敗，只是發現了...", "交流電很危險！", "我要申請專利！"],
+                 [T.OPPENHEIMER]: ["我成為了死神...", "世界的毀滅者。", "鏈式反應。", "Boom!"]
+             };
+             const list = msgs[id] || ["..."];
+             logMsg(d.name, list[Math.floor(Math.random()*list.length)]);
+        }
+
+        // 移動邏輯 (類似蝴蝶但受重力)
+        // 只有 10% 機率移動，避免過快
+        if (Math.random() < 0.1) {
+            let dx = Math.random() < 0.5 ? 1 : -1;
+            
+            // 特殊技能
+            if (id === T.TESLA && Math.random() < 0.2) {
+                 // 閃電攻擊
+                 const tx = x + (Math.random()<0.5?1:-1) * (Math.floor(Math.random()*3)+1);
+                 const ty = y + (Math.floor(Math.random()*3)-1);
+                 if (inB(tx, ty) && world[ty][tx] === T.EMPTY) {
+                     world[ty][tx] = T.LIGHTNING;
+                 }
+            }
+            else if (id === T.NEWTON && Math.random() < 0.2) {
+                 // 重力場：吸取上方物體
+                 for(let i=1; i<5; i++) {
+                     if(inB(x, y-i) && world[y-i][x] !== T.EMPTY && D[world[y-i][x]].fall) {
+                         // 將上方物體拉到身邊空位
+                         if(inB(x+1, y) && world[y][x+1] === T.EMPTY) world[y][x+1] = world[y-i][x];
+                         else if(inB(x-1, y) && world[y][x-1] === T.EMPTY) world[y][x-1] = world[y-i][x];
+                         world[y-i][x] = T.EMPTY;
+                         break;
+                     }
+                 }
+            }
+            else if (id === T.CURIE && Math.random() < 0.05) {
+                 // 輻射
+                 for(let dy=-1; dy<=1; dy++) for(let dx=-1; dx<=1; dx++) {
+                     if(dx===0&&dy===0) continue;
+                     const tx=x+dx, ty=y+dy;
+                     if(inB(tx, ty) && world[ty][tx] !== T.EMPTY && world[ty][tx] !== T.VOID && world[ty][tx] !== T.ACID) {
+                          if(Math.random()<0.1) world[ty][tx] = T.ACID;
+                     }
+                 }
+            }
+            else if (id === T.ELON && Math.random() < 0.1) {
+                 // 發射火箭
+                 if(inB(x, y-1) && world[y-1][x] === T.EMPTY) {
+                     world[y-1][x] = T.ROCKET;
+                 }
+            }
+            else if (id === T.EINSTEIN && Math.random() < 0.02) {
+                // 量子穿隧 (隨機傳送)
+                let tx = Math.floor(Math.random() * COLS);
+                let ty = Math.floor(Math.random() * ROWS);
+                if (world[ty][tx] === T.EMPTY) {
+                     world[ty][tx] = id;
+                     world[y][x] = T.EMPTY;
+                     continue;
+                }
+            }
+            else if (id === T.DARWIN && Math.random() < 0.05) {
+                // 演化：將泥土變種子，水變酸(原始湯)
+                 for(let dy=-1; dy<=1; dy++) for(let dx=-1; dx<=1; dx++) {
+                     if(dx===0&&dy===0) continue;
+                     const tx=x+dx, ty=y+dy;
+                     if(inB(tx, ty)) {
+                         if(world[ty][tx] === T.DIRT) world[ty][tx] = T.SEED;
+                         else if(world[ty][tx] === T.WATER && Math.random()<0.1) world[ty][tx] = T.ACID; 
+                     }
+                 }
+            }
+            else if (id === T.EDISON && Math.random() < 0.1) {
+                // 燈泡 (生成小火花)
+                if(inB(x, y-1) && world[y-1][x] === T.EMPTY) {
+                    world[y-1][x] = T.FIRE;
+                }
+                // 吸收閃電
+                for(let dy=-2; dy<=2; dy++) for(let dx=-2; dx<=2; dx++) {
+                     const tx=x+dx, ty=y+dy;
+                     if(inB(tx, ty) && world[ty][tx] === T.LIGHTNING) {
+                         world[ty][tx] = T.EMPTY;
+                     }
+                 }
+            }
+            else if (id === T.OPPENHEIMER && Math.random() < 0.005) {
+                // 毀滅者 (生成TNT)
+                if(inB(x, y-1) && world[y-1][x] === T.EMPTY) {
+                    world[y-1][x] = T.TNT;
+                }
+            }
+
+            // 左右走動
+            const nx = x + dx;
+            if(inB(nx, y) && world[y][nx] === T.EMPTY) {
+                 world[y][nx] = id;
+                 world[y][x] = T.EMPTY;
+                 // 移動後跳過本幀後續處理 (雖然 x 變了但 y 沒變，本行已處理完)
+                 // 但為了安全
+                 continue;
+            }
+        }
+    }
+
+    // 閃電/火箭生命週期
+    if (d.life) {
+        if (Math.random() < 0.1) {
+            world[y][x] = T.EMPTY;
+            continue;
+        }
+        if (id === T.ROCKET) {
+             // 向上飛 (為了防止瞬間飛天，我們只在偶數幀或低機率飛)
+             if (Math.random() < 0.2 && inB(x, y-1)) {
+                 if (world[y-1][x] === T.EMPTY) {
+                     world[y-1][x] = T.ROCKET;
+                     world[y][x] = T.FIRE; // 尾跡
+                     continue;
+                 } else {
+                     // 撞到東西爆炸
+                     explode(x, y, 3, T.TNT);
+                 }
+             }
+        }
+        if (id === T.LIGHTNING) {
+            // 隨機亂竄
+            const dx = Math.floor(Math.random()*3)-1;
+            const dy = Math.floor(Math.random()*3)-1;
+            const nx=x+dx, ny=y+dy;
+            if(inB(nx,ny) && world[ny][nx] !== T.LIGHTNING) {
+                if(world[ny][nx] !== T.EMPTY) {
+                    // 電擊破壞
+                    world[ny][nx] = T.FIRE;
+                } else {
+                    world[ny][nx] = T.LIGHTNING;
+                    world[y][x] = T.EMPTY;
+                }
+                continue;
+            }
+        }
+    }
+
+    /* 蝴蝶 (BUTTERFLY) 行為 (略) */
+    if(id === T.BUTTERFLY) {
+        if (Math.random() < 0.5) {
+            continue; 
+        }
+        let dx = Math.random() < 0.33 ? 1 : (Math.random() < 0.5 ? -1 : 0);
+        let dy = Math.random() < 0.8 ? 0 : -1;
+        if(Math.random() < 0.05) dy = 1;
+
+        let nx=x+dx,ny=y+dy;
+        
+        if(inB(nx,ny)){
+            let targetID = world[ny][nx];
+            if(targetID === T.EMPTY || (D[targetID] && D[targetID].d < d.d)) {
+                 [world[y][x],world[ny][nx]]=[world[ny][nx],id];
+            } else {
+                 if(Math.random() < 0.005) world[y][x] = T.EMPTY; 
+            }
+        }
+        continue;
+    }
+    
+    /* 種子 (SEED) 行為 */
+    if(id === T.SEED) {
+        // ...
+    }
+
+    /* 重力與密度/漂浮 */
+    let nx=x+gDir.x,ny=y+gDir.y; 
+    
+    let swap = false;
+    if(inB(nx,ny)){
+        let belowID = world[ny][nx];
+        let belowD = D[belowID];
+        
+        if (!belowD) {
+             continue;
+        }
+
+        if (belowD.static) {
+             swap = false; 
+        }
+        
+        else if (belowID === T.EMPTY || belowD.d < d.d) {
+            swap = true;
+        } 
+        else if (belowD.fluid && !d.float && d.d > belowD.d) {
+            swap = true;
+        } 
+        else if (d.float && belowD.fluid && d.d < belowD.d) {
+             swap = false; 
+        }
+
+        if (swap) {
+            [world[y][x],world[ny][nx]]=[world[ny][nx],id];
+            continue;
+        }
+    }
+
+    /* 流體橫向移動 (略) */
+    if(d.fluid){
+      if (gDir.x !== 0 && Math.random() < 0.2) continue;
+      
+      let dir=Math.random()<0.5?-1:1;
+      let sx=x+dir;
+      if(inB(sx,y)&&world[y][sx]===T.EMPTY){ 
+        world[y][sx]=id; world[y][x]=0;
+      }
+    }
+
+    /* 火 行為 (略) */
+    if(id===T.FIRE){
+      for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+        let xx=x+dx,yy=y+dy;
+        if(!inB(xx,yy))continue;
+        
+        let targetID = world[yy][xx];
+        let targetD = D[targetID]; 
+        
+        if (!targetD) continue;
+
+        if(targetD.flammable) {
+            let burnChance = 0.5; 
+
+            if (targetD.slowBurn) { 
+                burnChance = 0.05;
+            } 
+
+            if (Math.random() < burnChance) {
+                 world[yy][xx]=T.FIRE;
+            } else if (targetID !== T.OIL && Math.random() < 0.005) {
+                 world[yy][xx]=T.FIRE; 
+            }
+        }
+        
+        if((targetID===T.TNT||targetID===T.BANANA_BOMB)&&!bombTimer[xx+","+yy]) 
+            bombTimer[xx+","+yy]=40; 
+        
+        if(targetID===T.WATER) {
+             if(Math.random()<0.04) world[y][x]=0; 
+        }
+
+        if(targetID === T.BUTTERFLY) world[yy][xx] = T.EMPTY;
+      }
+      if(Math.random()<0.04) world[y][x]=0; 
+    }
+
+    /* 酸 (略) */
+    if(id===T.ACID){
+      for(let dy=0;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+        let xx=x+dx,yy=y+dy;
+        if(!inB(xx,yy))continue; 
+
+        let targetID = world[yy][xx];
+        
+        if(targetID!==T.ACID && targetID!==T.EMPTY && D[targetID] && Math.random()<0.02) {
+             world[yy][xx]=0; 
+        }
+        if(targetID === T.BUTTERFLY) world[yy][xx] = T.EMPTY;
+      }
+    }
+
+    /* TNT / 香蕉炸彈 (爆炸計時) (略) */
+    if(id===T.TNT || id===T.BANANA_BOMB){
+      let k=x+","+y;
+      let fuseTime;
+      let explosionRadius;
+      
+      if (id === T.TNT) {
+          fuseTime = 60;
+          explosionRadius = 7;
+      } else if (id === T.BANANA_BOMB) {
+          fuseTime = 40;
+          explosionRadius = 6;
+      }
+      
+      bombTimer[k]=(bombTimer[k]||fuseTime)-1;
+      
+      if(bombTimer[k]<=0){
+        explode(x,y, explosionRadius, id);
+        delete bombTimer[k];
+      }
+    }
+  }
+}
+
+
+/* ===== 繪製 ===== */
+// 預先計算顏色緩存 (Int32)
+const colorCache = {};
+
+function parseColor(hex) {
+    if (typeof hex === 'function') return null; // 暫不緩存動態顏色
+    if (!hex.startsWith('#')) return 0xFF000000;
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return (255 << 24) | (b << 16) | (g << 8) | r; // ABGR for Little Endian
+}
+
+// 角色符號映射
+const charSprites = {
+    [T.TESLA]: "⚡",
+    [T.NEWTON]: "🍎",
+    [T.CURIE]: "☢️",
+    [T.ELON]: "🚀",
+    [T.EINSTEIN]: "🧠",
+    [T.DARWIN]: "🐒",
+    [T.EDISON]: "💡",
+    [T.OPPENHEIMER]: "💣"
+};
+
+let lastTime = performance.now();
+let frames = 0;
+const fpsDiv = document.getElementById("fps-counter");
+
+function draw(){
+  if (COLS === 0 || ROWS === 0) return; 
+  
+  // 計算 FPS
+  frames++;
+  const now = performance.now();
+  if (now - lastTime >= 1000) {
+      fpsDiv.textContent = `FPS: ${frames}`;
+      frames = 0;
+      lastTime = now;
+  }
+
+  // 使用 ImageData 優化渲染
+  // imgData 和 data 已在 resizeCanvas 中初始化
+  // 清空 data 緩衝區 (全黑/透明) - 如果每一幀都全覆蓋，這一步可省略，但為了保險先清空
+  // 0xFF000000 是不透明黑色 (ABGR)，如果是透明則為 0
+  // 由於我們背景色是 #0b0b0b -> R=11, G=11, B=11 -> ABGR = FF0B0B0B
+  // 為了最快速度，可以用 fill
+  data.fill(0xFF0B0B0B); 
+  
+  // 填充背景與粒子
+  for(let y=0;y<ROWS;y++) {
+      for(let x=0;x<COLS;x++){
+        let id = world[y][x];
+        if (id === 0) continue; // 跳過空像素，保留背景色
+
+        let d = D[id];
+        let colVal;
+
+        if (d.char) {
+             // 角色優化：不繪製底層方塊顏色，只繪製 Sprite
+             // 設置為背景色 (透明/黑色)
+             colVal = 0xFF0B0B0B;
+        }
+        else if (typeof d.c === 'function') {
+             // 動態顏色 (如木頭) 需實時解析，效能稍差但必要
+             // 這裡簡化：只取一個固定色或重新解析
+             // 為了效能，這裡暫時使用固定近似色，或者解析函數返回值
+             // 但原邏輯每次都變色，這裡為了 ImageData 效能，我們需要轉換
+             let cStr = d.c();
+             let r = parseInt(cStr.slice(1, 3), 16);
+             let g = parseInt(cStr.slice(3, 5), 16);
+             let b = parseInt(cStr.slice(5, 7), 16);
+             colVal = (255 << 24) | (b << 16) | (g << 8) | r;
+        } else {
+             if (!colorCache[id]) colorCache[id] = parseColor(d.c);
+             colVal = colorCache[id];
+        }
+
+        // 填充 4x4 區塊 (SIZE=4)
+        const baseIdx = (y * SIZE * canvas.width) + (x * SIZE);
+        for(let dy=0; dy<SIZE; dy++) {
+            const rowOffset = baseIdx + dy * canvas.width;
+            for(let dx=0; dx<SIZE; dx++) {
+                data[rowOffset + dx] = colVal;
+            }
+        }
+      }
+  }
+  
+  ctx.putImageData(imgData, 0, 0);
+
+  // 第二層：繪製角色 Sprite (Emoji)
+  ctx.font = "12px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  
+  for(let y=0;y<ROWS;y++)for(let x=0;x<COLS;x++){
+      let id = world[y][x];
+      if (D[id].char && charSprites[id]) {
+          // 在粒子上方繪製 Emoji
+          const cx = x * SIZE + SIZE/2;
+          const cy = y * SIZE + SIZE/2 + 1; // 微調垂直位置
+          ctx.fillStyle = "#FFFFFF";
+          // 為了讓 Emoji 看得清楚，可以加個陰影
+          ctx.shadowColor="black";
+          ctx.shadowBlur=2;
+          ctx.fillText(charSprites[id], cx, cy);
+          ctx.shadowBlur=0;
+      }
+  }
+}
+
+/* ===== 循環 (略) ===== */
+(function loop(){
+  step();
+  draw();
+  requestAnimationFrame(loop);
+})();
+
+function logMsg(name, msg) {
+    const log = document.getElementById('game-log');
+    const div = document.createElement('div');
+    div.className = 'log-msg';
+    div.innerHTML = `<span class="log-name">${name}:</span> ${msg}`;
+    log.prepend(div);
+    if(log.children.length > 10) log.lastChild.remove();
+}
+</script>
+</body>
+</html>
