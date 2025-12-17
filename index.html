@@ -255,7 +255,8 @@ const T = {
   ASH:40, SALT:41, SOAP:42, SLIME:43, GLASS:44,
   BRICK:45, STEEL:46, COAL:47, FUSE:48, DRY_ICE:49,
   PLANT:50, FLOWER:51, VINE:52, MOSS:53, FIREWORK:54,
-  CONFETTI:55, GLITTER:56, BONE:57, BLOOD:58, URANIUM:59
+  CONFETTI:55, GLITTER:56, BONE:57, BLOOD:58, URANIUM:59,
+  SPARK:60
 };
 
 /* ===== 數據 (D) (不變) ===== */
@@ -265,13 +266,13 @@ const D = {
   2:{c:"#3399ff",d:5,fluid:true, name:"水"},
   3:{c:"#553311",d:4,fluid:true,flammable:true, name:"油"},
   4:{c:()=>`#${(0x8B5A2B + Math.floor(Math.random()*10)).toString(16)}`,d:3, static:true, flammable:true, name:"木頭", slowBurn:true}, 
-  5:{c:"#ffcc33",d:1, name:"火"},
+  5:{c:"#ffcc33",d:1, fly:true, life:25, name:"火"},
   6:{c:"#ff3333",d:10,tnt:true, static:true, flammable:true, name:"TNT"}, 
   7:{c:"#777777",d:7, static:true, name:"石頭"},
   8:{c:"#66ff66",d:4,fluid:true,acid:true, name:"酸"},
   9:{c:"#ffff66",d:6,banana:true, fall:true, float:true, flammable:true, name:"香蕉炸彈"}, 
   10:{c:"#8B4513",d:5,fall:true, flammable:true, name:"大便"},
-  11:{c:"#800080",d:0.1, fly:true, name:"寬尾鳳蝶亞種褐斑寬尾鳳蝶"},
+  11:{c:"#800080",d:0.1, fly:true, flammable:true, name:"寬尾鳳蝶亞種褐斑寬尾鳳蝶"},
   12:{c:"#cccccc",d:10, static:true, name:"(S)-N-[2-(N,N-二異丙基氨基)乙基]苯甲酰胺", immobile: true}, 
   13:{c:"#5a3b2a",d:6, fall:true, name:"泥土"}, 
   14:{c:"#00aa00",d:5, fall:true, name:"種子"},
@@ -288,10 +289,10 @@ const D = {
   25:{c:"#ff8800",d:1, name:"火箭火", life:20},
   30:{c:"#aaddff",d:4,fall:true,name:"冰"},
   31:{c:"#ddeeFF",d:0,fly:true,name:"水蒸氣"},
-  32:{c:"#ff4400",d:5,fluid:true,name:"岩漿"},
+  32:{c:"#ff4400",d:6,fluid:true,viscous:true,name:"岩漿"},
   33:{c:"#b0b0b0",d:15,fluid:true,name:"水銀"},
   34:{c:"#440044",d:0,fly:true,flammable:true,name:"甲烷"},
-  35:{c:"#999999",d:6,fluid:true,name:"水泥"},
+  35:{c:"#999999",d:6,fluid:true,viscous:true,name:"水泥"},
   36:{c:"#88ff88",d:5,fluid:true,name:"病毒"},
   37:{c:"#330000",d:1,fall:true,name:"反物質"},
   38:{c:"#ffff88",d:2,static:true,name:"海綿"},
@@ -304,7 +305,7 @@ const D = {
   45:{c:"#aa4444",d:10,static:true,name:"磚塊"},
   46:{c:"#555577",d:15,static:true,name:"鋼鐵"},
   47:{c:"#222222",d:5,fall:true,flammable:true,name:"煤炭"},
-  48:{c:"#332211",d:4,static:true,flammable:true,name:"導火線"},
+  48:{c:"#332211",d:4,static:true,flammable:true,name:"導火線", fuse:true},
   49:{c:"#eeeeff",d:3,fall:true,name:"乾冰"},
   50:{c:"#00aa00",d:4,static:true,flammable:true,name:"植物"},
   51:{c:"#ff66aa",d:4,static:true,name:"花"},
@@ -316,7 +317,8 @@ const D = {
   57:{c:"#eeeecc",d:8,static:true,name:"骨頭"},
   58:{c:"#aa0000",d:5,fluid:true,name:"血"},
   59:{c:"#00ff00",d:10,fall:true,name:"鈾"},
-  100:{c:"#ff69b4",d:0, name:"惡搞:搔癢羽毛", tool:true},
+   60:{c:"#ffffdd",d:1,life:5,fly:true,name:"火花"},
+   100:{c:"#ff69b4",d:0, name:"惡搞:搔癢羽毛", tool:true},
   101:{c:"#ffff00",d:0, name:"惡搞:電擊槍", tool:true},
   102:{c:"#000000",d:0, name:"惡搞:黑洞", tool:true}
 };
@@ -592,6 +594,12 @@ function step(){
   for(let y=ROWS-1;y>=0;y--)for(let x=0;x<COLS;x++){
     let id=world[y][x],d=D[id];
     if(id===0)continue;
+
+    // 生命週期衰減
+    if (d.life && Math.random() < 1/d.life) {
+        world[y][x] = T.EMPTY;
+        continue;
+    }
 
     let isStatic = d.static;
     
@@ -947,29 +955,42 @@ function step(){
     }
 
     /* 重力與密度/漂浮 */
-    let nx=x+gDir.x,ny=y+gDir.y; 
+    let dy = gDir.y;
+    let isRising = false;
+    if (d.fly) {
+        dy = -1; 
+        isRising = true;
+        // 為了避免向上移動時因掃描順序導致的瞬間傳送(Teleport)，降低移動機率
+        if(Math.random() < 0.7) dy = 0; 
+    }
+
+    let nx=x+gDir.x,ny=y+dy; 
     
     let swap = false;
     if(inB(nx,ny)){
-        let belowID = world[ny][nx];
-        let belowD = D[belowID];
+        let targetID = world[ny][nx];
+        let targetD = D[targetID];
         
-        if (!belowD) {
+        if (!targetD) {
              continue;
         }
 
-        if (belowD.static) {
+        if (targetD.static) {
              swap = false; 
         }
-        
-        else if (belowID === T.EMPTY || belowD.d < d.d) {
+        else if (targetID === T.EMPTY) {
             swap = true;
         } 
-        else if (belowD.fluid && !d.float && d.d > belowD.d) {
-            swap = true;
-        } 
-        else if (d.float && belowD.fluid && d.d < belowD.d) {
-             swap = false; 
+        else if (isRising) {
+            // 上升：如果上方物體比我重，交換 (浮力)
+            if (targetD.d > d.d) swap = true;
+        }
+        else {
+            // 下降：如果下方物體比我輕，交換 (重力)
+            if (targetD.d < d.d) swap = true;
+            
+            // 液體混合優化
+            if (d.fluid && targetD.fluid && d.d > targetD.d) swap = true;
         }
 
         if (swap) {
@@ -978,8 +999,9 @@ function step(){
         }
     }
 
-    /* 流體橫向移動 (略) */
+    /* 流體橫向移動 */
     if(d.fluid){
+      if (d.viscous && Math.random() < 0.9) continue; // 黏稠液體流動緩慢
       if (gDir.x !== 0 && Math.random() < 0.2) continue;
       
       let dir=Math.random()<0.5?-1:1;
@@ -989,8 +1011,8 @@ function step(){
       }
     }
 
-    /* 火 行為 (略) */
-    if(id===T.FIRE){
+    /* 火 / 火花 行為 */
+    if(id===T.FIRE || id===T.SPARK){
       for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
         let xx=x+dx,yy=y+dy;
         if(!inB(xx,yy))continue;
@@ -1000,17 +1022,25 @@ function step(){
         
         if (!targetD) continue;
 
+        // 火花引燃導火線
+        if (targetD.fuse) {
+            world[yy][xx] = T.SPARK;
+            continue;
+        }
+
         if(targetD.flammable) {
-            let burnChance = 0.5; 
+            let burnChance = 0.1; 
+            if (id === T.SPARK) burnChance = 0.5; // 火花引燃率更高
 
             if (targetD.slowBurn) { 
-                burnChance = 0.05;
+                burnChance = 0.01;
             } 
+            if (targetD.tnt || targetID === T.FIREWORK) {
+                burnChance = 0.8; // 炸藥極易引燃
+            }
 
             if (Math.random() < burnChance) {
                  world[yy][xx]=T.FIRE;
-            } else if (targetID !== T.OIL && Math.random() < 0.005) {
-                 world[yy][xx]=T.FIRE; 
             }
         }
         
@@ -1019,14 +1049,20 @@ function step(){
         
         if(targetID===T.WATER) {
              if(Math.random()<0.04) world[y][x]=0; 
+             if(Math.random()<0.1) world[yy][xx]=T.STEAM; // 水煮沸
         }
-
-        if(targetID === T.BUTTERFLY) world[yy][xx] = T.EMPTY;
       }
-      if(Math.random()<0.04) world[y][x]=0; 
     }
 
-    /* 酸 (略) */
+    /* 火花移動 */
+    if (id === T.SPARK) {
+        if(Math.random()<0.5 && inB(x, y-1) && world[y-1][x]===T.EMPTY) {
+            world[y-1][x] = T.SPARK;
+            world[y][x] = T.EMPTY;
+        }
+    }
+
+    /* 酸 */
     if(id===T.ACID){
       for(let dy=0;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
         let xx=x+dx,yy=y+dy;
@@ -1034,10 +1070,13 @@ function step(){
 
         let targetID = world[yy][xx];
         
-        if(targetID!==T.ACID && targetID!==T.EMPTY && D[targetID] && Math.random()<0.02) {
-             world[yy][xx]=0; 
+        if(targetID!==T.ACID && targetID!==T.EMPTY && D[targetID] && Math.random()<0.05) {
+             world[yy][xx]=0; // 腐蝕
+             // 產生煙霧/氣體
+             if (Math.random() < 0.3 && inB(xx, yy-1) && world[yy-1][xx] === T.EMPTY) {
+                 world[yy-1][xx] = T.METHANE;
+             }
         }
-        if(targetID === T.BUTTERFLY) world[yy][xx] = T.EMPTY;
       }
     }
 
